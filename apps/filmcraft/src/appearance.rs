@@ -13,25 +13,25 @@ const PORTAL_NAMESPACE: &str = "org.freedesktop.appearance";
 const PORTAL_KEY: &str = "color-scheme";
 
 #[cfg(target_os = "linux")]
-fn portal_proxy() -> Option<zbus::blocking::Proxy<'static>> {
-    let conn = zbus::blocking::connection::Builder::session().ok()?.method_timeout(std::time::Duration::from_secs(2)).build().ok()?;
-    zbus::blocking::Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings").ok()
+async fn portal_proxy() -> Option<zbus::Proxy<'static>> {
+    let conn = zbus::connection::Builder::session().method_timeout(std::time::Duration::from_secs(2)).build().await.ok()?;
+    zbus::Proxy::new_owned(conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings").await.ok()
 }
 
 #[cfg(target_os = "linux")]
-fn portal_theme(proxy: &zbus::blocking::Proxy<'_>) -> Option<egui::Theme> {
-    let value: zbus::zvariant::OwnedValue = proxy.call("Read", &(PORTAL_NAMESPACE, PORTAL_KEY)).ok()?;
+async fn portal_theme(proxy: &zbus::Proxy<'_>) -> Option<egui::Theme> {
+    let value: zbus::OwnedVariant = proxy.call("Read", &(PORTAL_NAMESPACE, PORTAL_KEY)).await.ok()?;
     decode(portal_code(value)?)
 }
 
 /// The `u32` inside a portal reply. `Read` returns a variant, and some portals nest another
 /// variant inside it.
 #[cfg(target_os = "linux")]
-fn portal_code(value: zbus::zvariant::OwnedValue) -> Option<u32> {
-    let mut value: zbus::zvariant::Value<'_> = value.into();
+fn portal_code(value: zbus::OwnedVariant) -> Option<u32> {
+    let mut value: zbus::Variant<'_> = value.into();
     for _ in 0..4 {
         match value {
-            zbus::zvariant::Value::Value(inner) => value = *inner,
+            zbus::Variant::Variant(inner) => value = *inner,
             other => return u32::try_from(other).ok(),
         }
     }
@@ -86,6 +86,48 @@ fn publish(value: &std::sync::atomic::AtomicU8, code: u8, repaint: impl FnOnce()
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn watch(
+    value: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    wake: std::sync::Arc<std::sync::OnceLock<egui::Context>>,
+    ready: std::sync::mpsc::Sender<()>,
+) {
+    use futures_util::StreamExt as _;
+    let proxy = portal_proxy().await;
+    // Subscribe before Read so a change during startup cannot be missed.
+    let signals = match proxy.as_ref() {
+        Some(p) => p.receive_signal("SettingChanged").await.ok(),
+        None => None,
+    };
+    let initial = match proxy.as_ref() {
+        Some(p) => portal_theme(p).await,
+        None => None,
+    }
+    .or_else(gtk_theme);
+    publish(&value, code_of(initial), || {
+        if let Some(ctx) = wake.get() {
+            ctx.request_repaint();
+        }
+    });
+    let _ = ready.send(());
+    let Some(mut signals) = signals else { return };
+    // Awaits the next signal: no polling.
+    while let Some(message) = signals.next().await {
+        let Ok((namespace, key, changed)) = message.body().deserialize::<(String, String, zbus::OwnedVariant)>() else {
+            continue;
+        };
+        if namespace != PORTAL_NAMESPACE || key != PORTAL_KEY {
+            continue;
+        }
+        let code = code_of(portal_code(changed).and_then(decode));
+        publish(&value, code, || {
+            if let Some(ctx) = wake.get() {
+                ctx.request_repaint();
+            }
+        });
+    }
+}
+
 /// The host hook (`HostHooks::system_theme`), or `None` where egui's own report is used.
 pub fn service() -> Option<filmcraft_ui_egui::SystemThemeFn> {
     #[cfg(target_os = "linux")]
@@ -97,32 +139,7 @@ pub fn service() -> Option<filmcraft_ui_egui::SystemThemeFn> {
         let (worker_value, worker_wake) = (Arc::clone(&value), Arc::clone(&wake));
         let (ready, wait) = std::sync::mpsc::channel();
         let worker = move || {
-            let proxy = portal_proxy();
-            // Subscribe before Read so a change during startup cannot be missed.
-            let signals = proxy.as_ref().and_then(|p| p.receive_signal("SettingChanged").ok());
-            let initial = proxy.as_ref().and_then(portal_theme).or_else(gtk_theme);
-            publish(&worker_value, code_of(initial), || {
-                if let Some(ctx) = worker_wake.get() {
-                    ctx.request_repaint();
-                }
-            });
-            let _ = ready.send(());
-            let Some(signals) = signals else { return };
-            // Sleeps in the signal iterator: no polling.
-            for message in signals {
-                let Ok((namespace, key, changed)) = message.body().deserialize::<(String, String, zbus::zvariant::OwnedValue)>() else {
-                    continue;
-                };
-                if namespace != PORTAL_NAMESPACE || key != PORTAL_KEY {
-                    continue;
-                }
-                let code = code_of(portal_code(changed).and_then(decode));
-                publish(&worker_value, code, || {
-                    if let Some(ctx) = worker_wake.get() {
-                        ctx.request_repaint();
-                    }
-                });
-            }
+            zbus::block_on(watch(worker_value.clone(), worker_wake.clone(), ready));
         };
         let spawned = std::thread::Builder::new().name("appearance-portal".into()).spawn(move || {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker)).is_err() {
@@ -173,11 +190,11 @@ mod tests {
         assert_eq!(super::decode(1), Some(egui::Theme::Dark));
         assert_eq!(super::decode(2), Some(egui::Theme::Light));
         assert_eq!(super::decode(9), None);
-        let nested = zbus::zvariant::Value::Value(Box::new(zbus::zvariant::Value::Value(Box::new(zbus::zvariant::Value::U32(2)))));
-        assert_eq!(super::portal_code(zbus::zvariant::OwnedValue::try_from(nested).unwrap()), Some(2));
-        let plain = zbus::zvariant::OwnedValue::from(1u32);
+        let nested = zbus::Variant::Variant(Box::new(zbus::Variant::Variant(Box::new(zbus::Variant::U32(2)))));
+        assert_eq!(super::portal_code(zbus::OwnedVariant::try_from(nested).unwrap()), Some(2));
+        let plain = zbus::OwnedVariant::from(1u32);
         assert_eq!(super::portal_code(plain), Some(1));
-        let wrong = zbus::zvariant::OwnedValue::try_from(zbus::zvariant::Value::from("dark")).unwrap();
+        let wrong = zbus::OwnedVariant::try_from(zbus::Variant::from("dark")).unwrap();
         assert_eq!(super::portal_code(wrong), None);
         assert_eq!(super::parse_gtk_scheme("'prefer-light'\n"), Some(egui::Theme::Light));
         assert_eq!(super::parse_gtk_scheme("'prefer-dark'\n"), Some(egui::Theme::Dark));

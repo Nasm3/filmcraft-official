@@ -58,6 +58,8 @@ winit = { version = "0.30", default-features = false }
 # Settings ▸ Appearance ▸ Sync with system: the XDG desktop portal's colour scheme. The zbus the
 # portal file dialogs (rfd) and accesskit already use.
 zbus = "6.0"
+# zbus 6 is async only: `block_on` drives the connection, and this awaits its signal stream.
+futures-util = { version = "0.3", default-features = false }
 
 # Icon + VERSIONINFO for filmcraft.exe (build.rs); only needed when building on Windows.
 [target.'cfg(windows)'.build-dependencies]

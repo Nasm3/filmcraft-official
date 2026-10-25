@@ -210,10 +210,18 @@ fn valid_file(path: &Path, file: &ModelFile) -> bool {
     }
     let Ok(mut input) = std::fs::File::open(path) else { return false };
     let mut hasher = sha2::Sha256::new();
-    if std::io::copy(&mut input, &mut hasher).is_err() {
-        return false;
+    // sha2 0.11's hasher is no longer an `io::Write`, so feed it explicitly.
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match std::io::Read::read(&mut input, &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&chunk[..n]),
+            Err(_) => return false,
+        }
     }
-    format!("{:x}", hasher.finalize()).eq_ignore_ascii_case(file.sha256)
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    hex.eq_ignore_ascii_case(file.sha256)
 }
 
 /// All files present and matching their pinned size and SHA-256.
