@@ -98,7 +98,7 @@ where
 {
     let channels = usize::from(config.channels);
     let stream_error = error.clone();
-    dev.build_input_stream(config.clone(), move |data: &[T], _| append(data, channels, &buf, &error), move |e| report_error(&stream_error, e.to_string()), None)
+    dev.build_input_stream(*config, move |data: &[T], _| append(data, channels, &buf, &error), move |e| report_error(&stream_error, e.to_string()), None)
 }
 
 impl AudioInput for CpalIn {

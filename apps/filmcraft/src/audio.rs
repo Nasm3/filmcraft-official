@@ -182,7 +182,7 @@ impl CpalOut {
         let error_health = health.clone();
         let mut scratch = Vec::new();
         dev.build_output_stream(
-            config.clone(),
+            *config,
             move |buf: &mut [T], _| {
                 // Reuse the conversion buffer. A pathological driver buffer must not panic the audio thread.
                 if buf.len() > 1_048_576 || scratch.try_reserve(buf.len().saturating_sub(scratch.len())).is_err() {
@@ -217,7 +217,7 @@ impl CpalOut {
         {
             return Err(format!("the output device now runs at {} Hz with {} channels", cfg.sample_rate(), cfg.channels()));
         }
-        let mut config: cpal::StreamConfig = cfg.clone().into();
+        let mut config: cpal::StreamConfig = cfg.into();
         if let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size()
             && (*min..=*max).contains(&self.hw.buffer_size)
         {
@@ -231,7 +231,7 @@ impl CpalOut {
                 let health = self.health.clone();
                 let error_health = health.clone();
                 dev.build_output_stream(
-                    config.clone(),
+                    config,
                     move |buf: &mut [f32], _| render(&fill, buf, channels, &played, &health),
                     move |e| stream_error(&error_health, e),
                     None,
