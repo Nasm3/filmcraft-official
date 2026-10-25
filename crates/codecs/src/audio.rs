@@ -839,8 +839,7 @@ impl AudioFileSource {
         let rate = params.sample_rate.unwrap_or(48_000);
         let mut dec = symphonia::default::get_codecs().make_audio_decoder(&params, &dec_opts).map_err(|e| CodecError::Unsupported(e.to_string()))?;
         let mut samples: Vec<Vec<f32>> = Vec::new();
-        loop {
-            let Ok(Some(pkt)) = format.next_packet() else { break };
+        while let Ok(Some(pkt)) = format.next_packet() {
             if pkt.track_id != track.id {
                 continue;
             }
